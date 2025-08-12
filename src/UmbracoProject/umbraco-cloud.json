@@ -1,7 +1,17 @@
 {
   "Deploy": {
     "Project": {
-      "Workspaces": []
+      "Name": "cegape trial",
+      "Alias": "cegape-trial",
+      "Id": "dad7005f-b2e8-4fde-ba3d-dcc6cab37b08",
+      "Workspaces": [
+        {
+          "Id": "fc9a04d0-e14f-4e40-83f7-f91149ed2c66",
+          "Name": "Live",
+          "Type": "live",
+          "Url": "https://cegape-trial.euwest01.umbraco.io"
+        }
+      ]
     },
     "Settings": {}
   },
