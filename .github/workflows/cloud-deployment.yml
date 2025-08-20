@@ -1,111 +1,109 @@
-parameters:
-  - name: projectId
-    type: string
-  - name: umbracoCloudApiKey
-  - name: newCommitSha
-    type: string
-    default: ''
+name: Deploy To Cloud
+
+on:
+  workflow_dispatch:
+    inputs:
+      newSha:
+        required: false
+        type: string
+
+  workflow_call:
+    inputs:
+      newSha:
+        required: false
+        type: string
+    secrets:
+      PROJECT_ID:
+        required: true
+      UMBRACO_CLOUD_API_KEY:
+        required: true
 
 jobs:
-  - job: prepareDeployment
-    displayName: Prepare Deployment to cloud
+  prepareDeployment:
+    name: Prepare Deployment to cloud
+    runs-on: ubuntu-latest
     steps:
-      - checkout: 'self'
-        persistCredentials: true
-        fetchDepth: 2
-        displayName: Check out
-               
-      - script: |
-          if [ -n "$(newCommitSha)" ]; then
-            echo "Including the latest incoming changes"
-            git fetch
-            git checkout $(newCommitSha)
-          fi
-        env:
-          newCommitSha: ${{ parameters.newCommitSha }}
-        displayName: 'Checking out updated repo'
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.newSha }}
 
       # switch the gitignore files so cloud does not ignore the build frontend assets
-      - script: cp cloud.gitignore .gitignore
-        displayName: Prepare Cloud Git Ignore
-      
+      - name: Prepare Cloud Git Ignore
+        run: cp cloud.gitignore .gitignore
+        shell: bash
+
       # zip everything, except what is defined in the 'cloud.zipignore'
-      - script: zip -r sources.zip . -x@cloud.zipignore
-        displayName: Zip Source Code
+      - name: Zip Source Code
+        run: zip -r sources.zip . -x@cloud.zipignore
+        shell: bash
 
-      - publish: $(System.DefaultWorkingDirectory)/sources.zip
-        displayName: Store package for upload
-        artifact: SourcesZip
+      - name: Store package for upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-artifact
+          path: ${{GITHUB.WORKSPACE}}/sources.zip
+          retention-days: 1
 
-  - job: callUmbracoApi
-    displayName: Upload Source And Start Deployment
-    dependsOn: prepareDeployment
+  callUmbracoApi:
+    name: Upload Source And Start Deployment
+    runs-on: ubuntu-latest
+    needs: prepareDeployment
+    outputs:
+      runningDeploymentId: ${{ steps.deployment-meta.outputs.deploymentId }}
     steps:
-      - download: current
-        displayName: Get source zip from build
-        artifact: SourcesZip
+      - uses: actions/checkout@v4
+
+      - name: Get package for upload
+        uses: actions/download-artifact@v4
+        with:
+          name: source-artifact
 
       # Request to prepare a deployment
       # - sets the commit message to be used in cloud 
       # - supplies you with a deploymentId to be used in the rest of the process
-      - task: PowerShell@2
-        displayName: Create Deployment Meta
-        name: deploymentMeta
-        env:
-          projectId: ${{ parameters.projectId }}
-          umbracoApiKey: ${{ parameters.umbracoCloudApiKey }}
-        inputs:
-          pwsh: true
-          targetType: 'filePath'
-          filePath: devops/powershell/New-Deployment.ps1
-          arguments: > 
-            -ProjectId $($env:projectId)
-            -ApiKey $($env:umbracoApiKey)
-            -CommitMessage "Deploying $(Build.BuildNumber)"
-            -PipelineVendor $(pipelineVendor)
+      - name: Create Deployment Meta
+        id: deployment-meta
+        shell: bash
+        run: >
+          bash ${{GITHUB.WORKSPACE}}/.github/scripts/create_deployment.sh
+          ${{ secrets.PROJECT_ID }} 
+          ${{ secrets.UMBRACO_CLOUD_API_KEY }} 
+          "Run number ${{github.run_number}}" 
+          GITHUB
 
       # Upload your zipped artifact
-      - task: PowerShell@2
-        displayName: Post Zipped Artifact
-        env:
-          projectId: ${{ parameters.projectId }}
-          umbracoApiKey: ${{ parameters.umbracoCloudApiKey }}
-        inputs:
-          pwsh: true
-          targetType: 'filePath'
-          filePath: devops/powershell/Add-DeploymentPackage.ps1
-          arguments: > 
-            -ProjectId $($env:projectId)
-            -DeploymentId $(deploymentId)
-            -ApiKey $($env:umbracoApiKey)
-            -FilePath $(Pipeline.Workspace)/SourcesZip/sources.zip
+      - name: Post Zipped Artifact
+        shell: bash
+        run: >
+          bash ${{GITHUB.WORKSPACE}}/.github/scripts/upload_package.sh 
+          ${{ secrets.PROJECT_ID }} 
+          ${{ steps.deployment-meta.outputs.deploymentId }} 
+          ${{ secrets.UMBRACO_CLOUD_API_KEY }} 
+          ${{ GITHUB.WORKSPACE }}/sources.zip
 
       # Actually request to start the deployment process in cloud
-      - task: PowerShell@2
-        displayName: Request Start Deployment
-        env:
-          projectId: ${{ parameters.projectId }}
-          umbracoApiKey: ${{ parameters.umbracoCloudApiKey }}
-        inputs:
-          pwsh: true
-          targetType: 'filePath'
-          filePath: devops/powershell/Start-Deployment.ps1
-          arguments: > 
-            -ProjectId $($env:projectId)
-            -DeploymentId $(deploymentId)
-            -ApiKey $($env:umbracoApiKey)
+      - name: Request Start Deployment
+        shell: bash
+        run: >
+          bash ${{GITHUB.WORKSPACE}}/.github/scripts/start_deployment.sh 
+          ${{ secrets.PROJECT_ID }} 
+          ${{ steps.deployment-meta.outputs.deploymentId }} 
+          ${{ secrets.UMBRACO_CLOUD_API_KEY }}
 
-      # Poll until deployment finishes 
-      - task: PowerShell@2
-        displayName: Wait for deployment completed
+  awaitDeploymentFinished:
+    name: Await deployment to finish
+    runs-on: ubuntu-latest
+    needs: callUmbracoApi
+    steps:
+      - uses: actions/checkout@v4
+
+      # Poll until deployment finishes
+      - name: Wait for deployment completed
+        shell: bash
         env:
-          projectId: ${{ parameters.projectId }}
-          umbracoApiKey: ${{ parameters.umbracoCloudApiKey }}
-        inputs:
-          pwsh: true
-          targetType: 'filePath'
-          filePath: devops/powershell/Test-DeploymentStatus.ps1
-          arguments: > 
-            -ProjectId $($env:projectId)
-            -DeploymentId $(deploymentId)
-            -ApiKey $($env:umbracoApiKey)
+          runningDeploymentId: ${{ needs.callUmbracoApi.outputs.runningDeploymentId }}
+        run: >
+          bash ${{GITHUB.WORKSPACE}}/.github/scripts/get_deployment_status.sh 
+          ${{ secrets.PROJECT_ID }} 
+          ${{ env.runningDeploymentId }} 
+          ${{ secrets.UMBRACO_CLOUD_API_KEY }}
